@@ -570,6 +570,24 @@ class ZEDCaptureGUI(tk.Tk):
         ttk.Entry(output_frame, textvariable=self.svo_name_var).grid(
             row=1, column=1, sticky="ew", padx=4, pady=3
         )
+        
+        self.auto_timestamp_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            output_frame,
+            text="Auto timestamp",
+            variable=self.auto_timestamp_var,
+            command=self._update_timestamp_name,
+        ).grid(row=1, column=2, padx=(8, 4), pady=3, sticky="w")
+
+        ttk.Button(
+            output_frame,
+            text="Use current time",
+            command=self._update_timestamp_name,
+        ).grid(row=1, column=3, padx=4, pady=3)
+
+        ttk.Label(output_frame, text="Compression").grid(
+            row=1, column=4, padx=(10, 3)
+        )
 
         ttk.Label(output_frame, text="Compression").grid(
             row=1, column=2, padx=(10, 3)
