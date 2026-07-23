@@ -546,6 +546,70 @@ class ZEDCaptureGUI(tk.Tk):
         )
         self.pause_button.grid(row=0, column=8, padx=(14, 4), pady=3)
 
+        # Live ZED hardware exposure control.
+        ttk.Label(source_frame, text="Live exposure").grid(
+            row=1, column=0, padx=4, pady=(7, 3), sticky="w"
+        )
+
+        self.auto_exposure_var = tk.BooleanVar(value=True)
+        self.auto_exposure_check = ttk.Checkbutton(
+            source_frame,
+            text="Auto exposure",
+            variable=self.auto_exposure_var,
+            command=self._on_auto_exposure_changed,
+            state=tk.DISABLED,
+        )
+        self.auto_exposure_check.grid(
+            row=1, column=1, padx=4, pady=(7, 3), sticky="w"
+        )
+
+        ttk.Label(source_frame, text="Exposure (0–100)").grid(
+            row=1, column=2, padx=(14, 3), pady=(7, 3), sticky="e"
+        )
+
+        self.exposure_var = tk.DoubleVar(value=50.0)
+        self.exposure_scale = ttk.Scale(
+            source_frame,
+            variable=self.exposure_var,
+            from_=0,
+            to=100,
+            orient=tk.HORIZONTAL,
+            length=260,
+            command=self._on_exposure_slider,
+            state=tk.DISABLED,
+        )
+        self.exposure_scale.grid(
+            row=1, column=3, columnspan=3, padx=4, pady=(7, 3), sticky="ew"
+        )
+
+        self.exposure_value_var = tk.StringVar(value="Live only")
+        ttk.Label(
+            source_frame,
+            textvariable=self.exposure_value_var,
+            width=14,
+        ).grid(row=1, column=6, padx=4, pady=(7, 3))
+
+        self.apply_exposure_button = ttk.Button(
+            source_frame,
+            text="Apply Exposure",
+            command=self.apply_exposure_settings,
+            state=tk.DISABLED,
+        )
+        self.apply_exposure_button.grid(
+            row=1, column=7, padx=4, pady=(7, 3)
+        )
+
+        ttk.Label(
+            source_frame,
+            text="Applied to both sensors; SVO playback cannot change recorded exposure.",
+        ).grid(
+            row=1,
+            column=8,
+            padx=(12, 4),
+            pady=(7, 3),
+            sticky="w",
+        )
+
         output_frame = ttk.LabelFrame(self, text="Output / SVO", padding=8)
         output_frame.pack(fill=tk.X, padx=8, pady=4)
         output_frame.columnconfigure(1, weight=1)
@@ -570,13 +634,12 @@ class ZEDCaptureGUI(tk.Tk):
         ttk.Entry(output_frame, textvariable=self.svo_name_var).grid(
             row=1, column=1, sticky="ew", padx=4, pady=3
         )
-        
+
         self.auto_timestamp_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             output_frame,
             text="Auto timestamp",
             variable=self.auto_timestamp_var,
-            command=self._update_timestamp_name,
         ).grid(row=1, column=2, padx=(8, 4), pady=3, sticky="w")
 
         ttk.Button(
@@ -588,10 +651,6 @@ class ZEDCaptureGUI(tk.Tk):
         ttk.Label(output_frame, text="Compression").grid(
             row=1, column=4, padx=(10, 3)
         )
-
-        ttk.Label(output_frame, text="Compression").grid(
-            row=1, column=2, padx=(10, 3)
-        )
         self.compression_var = tk.StringVar(value="H265")
         ttk.Combobox(
             output_frame,
@@ -599,14 +658,14 @@ class ZEDCaptureGUI(tk.Tk):
             values=("H265", "H264", "LOSSLESS"),
             width=10,
             state="readonly",
-        ).grid(row=1, column=3, padx=3)
+        ).grid(row=1, column=5, padx=3)
 
         self.svo_record_button = ttk.Button(
             output_frame,
             text="Start SVO Recording",
             command=self.toggle_svo_recording,
         )
-        self.svo_record_button.grid(row=0, column=3, padx=8, pady=3)
+        self.svo_record_button.grid(row=0, column=5, padx=8, pady=3)
 
         action_frame = ttk.LabelFrame(self, text="Frame Export", padding=8)
         action_frame.pack(fill=tk.X, padx=8, pady=4)
@@ -714,6 +773,115 @@ class ZEDCaptureGUI(tk.Tk):
         if directory:
             self.output_root_var.set(directory)
 
+    def _update_timestamp_name(self) -> None:
+        """Fill the SVO/dataset name with the current local timestamp."""
+        self.svo_name_var.set(f"zed_{now_stem()}")
+
+    def _set_exposure_controls_enabled(self, enabled: bool) -> None:
+        """Exposure controls are active only for a live ZED camera."""
+        common_state = tk.NORMAL if enabled else tk.DISABLED
+        self.auto_exposure_check.config(state=common_state)
+        self.apply_exposure_button.config(state=common_state)
+
+        manual_enabled = enabled and not self.auto_exposure_var.get()
+        self.exposure_scale.config(
+            state=tk.NORMAL if manual_enabled else tk.DISABLED
+        )
+
+        if not enabled:
+            self.exposure_value_var.set("Live only")
+        elif self.auto_exposure_var.get():
+            self.exposure_value_var.set("Auto")
+        else:
+            self.exposure_value_var.set(
+                f"{int(round(self.exposure_var.get()))}%"
+            )
+
+    def _on_exposure_slider(self, value: str) -> None:
+        """Update the label; press Apply Exposure to send it to the camera."""
+        if not self.auto_exposure_var.get():
+            self.exposure_value_var.set(f"{int(round(float(value)))}%")
+
+    def _on_auto_exposure_changed(self) -> None:
+        self._set_exposure_controls_enabled(self.source_mode == "live")
+        if self.source_mode == "live":
+            self.apply_exposure_settings()
+
+    def apply_exposure_settings(self, show_error: bool = True) -> None:
+        """
+        Apply the ZED hardware exposure setting.
+
+        Auto uses EXPOSURE=-1. Manual uses an integer in [0, 100],
+        expressed as a percentage of the current camera frame period.
+        """
+        if self.source_mode != "live":
+            if show_error:
+                messagebox.showwarning(
+                    "Live camera required",
+                    "Exposure can only be changed while a live ZED camera is open.",
+                )
+            return
+
+        try:
+            if self.auto_exposure_var.get():
+                result = self.cam.set_camera_settings(
+                    sl.VIDEO_SETTINGS.EXPOSURE,
+                    -1,
+                )
+                display_value = "Auto"
+            else:
+                exposure = int(
+                    np.clip(round(self.exposure_var.get()), 0, 100)
+                )
+                result = self.cam.set_camera_settings(
+                    sl.VIDEO_SETTINGS.EXPOSURE,
+                    exposure,
+                )
+                display_value = f"{exposure}%"
+
+            if result != sl.ERROR_CODE.SUCCESS:
+                raise RuntimeError(str(result))
+
+            try:
+                read_result, actual_value = self.cam.get_camera_settings(
+                    sl.VIDEO_SETTINGS.EXPOSURE
+                )
+                if read_result == sl.ERROR_CODE.SUCCESS:
+                    if self.auto_exposure_var.get():
+                        display_value = f"Auto ({actual_value}%)"
+                    else:
+                        display_value = f"{actual_value}%"
+            except Exception:
+                pass
+
+            self.exposure_value_var.set(display_value)
+            self.set_status(f"Live exposure applied: {display_value}")
+        except Exception as exc:
+            self.set_status(f"Exposure setting failed: {exc}")
+            if show_error:
+                messagebox.showerror(
+                    "Exposure setting error",
+                    f"Failed to apply the ZED exposure setting:\n{exc}",
+                )
+
+    def _camera_control_metadata(self) -> dict:
+        return {
+            "exposure": {
+                "mode": (
+                    "auto" if self.auto_exposure_var.get() else "manual"
+                ),
+                "configured_value": (
+                    None
+                    if self.auto_exposure_var.get()
+                    else int(np.clip(round(self.exposure_var.get()), 0, 100))
+                ),
+                "unit": "percent_of_camera_frame_period",
+                "range": [0, 100],
+                "applies_to": "both synchronized ZED image sensors",
+                "live_camera_only": True,
+            }
+        }
+
     def _dataset_name(self) -> str:
         return safe_stem(self.svo_name_var.get())
 
@@ -778,6 +946,7 @@ class ZEDCaptureGUI(tk.Tk):
         self.last_right = None
         self.last_depth_view = None
         self._reset_warp_signs()
+        self._set_exposure_controls_enabled(False)
 
     def open_live(self) -> None:
         self._close_source()
@@ -795,12 +964,18 @@ class ZEDCaptureGUI(tk.Tk):
 
         self.source_mode = "live"
         self.sequence_frame_index = 0
-        self.svo_name_var.set(f"zed_{now_stem()}")
+
+        if self.auto_timestamp_var.get():
+            self._update_timestamp_name()
+
+        self._set_exposure_controls_enabled(True)
+        self.apply_exposure_settings(show_error=False)
 
         config = self.cam.get_camera_information().camera_configuration
         self.set_status(
             f"LIVE | {config.resolution.width}x{config.resolution.height} "
-            f"@ {config.fps} FPS | depth={self.depth_mode_var.get()}"
+            f"@ {config.fps} FPS | depth={self.depth_mode_var.get()} "
+            f"| exposure={self.exposure_value_var.get()}"
         )
 
     def open_svo(self) -> None:
@@ -832,6 +1007,7 @@ class ZEDCaptureGUI(tk.Tk):
         self.svo_path = svo_path
         self.svo_paused = False
         self.svo_name_var.set(svo_path.stem)
+        self._set_exposure_controls_enabled(False)
 
         total = max(int(self.cam.get_svo_number_of_frames()), 1)
         self.seek_scale.config(
@@ -955,6 +1131,7 @@ class ZEDCaptureGUI(tk.Tk):
             self.cam.disable_recording()
             self.is_svo_recording = False
             self.svo_record_button.config(text="Start SVO Recording")
+
             write_dataset_metadata(
                 self._dataset_root(),
                 source_mode="live",
@@ -963,6 +1140,7 @@ class ZEDCaptureGUI(tk.Tk):
                 depth_mode=self.depth_mode_var.get(),
                 warp_sign_r2l=self.warp_sign_r2l,
                 warp_sign_l2r=self.warp_sign_l2r,
+                extra={"camera_controls": self._camera_control_metadata()},
             )
             self.set_status(f"SVO recording stopped: {self.svo_record_path}")
             return
@@ -973,6 +1151,9 @@ class ZEDCaptureGUI(tk.Tk):
                 "SVO recording is enabled only for a live camera source.",
             )
             return
+
+        if self.auto_timestamp_var.get():
+            self._update_timestamp_name()
 
         dataset_root = self._dataset_root()
         dataset_root.mkdir(parents=True, exist_ok=True)
@@ -1016,8 +1197,11 @@ class ZEDCaptureGUI(tk.Tk):
             depth_mode=self.depth_mode_var.get(),
             warp_sign_r2l=self.warp_sign_r2l,
             warp_sign_l2r=self.warp_sign_l2r,
+            extra={"camera_controls": self._camera_control_metadata()},
         )
-        self.set_status(f"Recording SVO: {path}")
+        self.set_status(
+            f"Recording SVO: {path} | exposure={self.exposure_value_var.get()}"
+        )
 
     # ------------------------- Frame exporting -------------------------
 
@@ -1149,6 +1333,16 @@ class ZEDCaptureGUI(tk.Tk):
         self._write_current_metadata()
 
     def _write_current_metadata(self) -> None:
+        if self.source_mode == "live":
+            camera_controls = self._camera_control_metadata()
+        else:
+            camera_controls = {
+                "exposure": {
+                    "mode": "recorded_in_svo",
+                    "editable_during_playback": False,
+                }
+            }
+
         write_dataset_metadata(
             self._dataset_root(),
             source_mode=self.source_mode or "unknown",
@@ -1157,6 +1351,7 @@ class ZEDCaptureGUI(tk.Tk):
             depth_mode=self.depth_mode_var.get(),
             warp_sign_r2l=self.warp_sign_r2l,
             warp_sign_l2r=self.warp_sign_l2r,
+            extra={"camera_controls": camera_controls},
         )
 
     # ------------------------- Full SVO export -------------------------
